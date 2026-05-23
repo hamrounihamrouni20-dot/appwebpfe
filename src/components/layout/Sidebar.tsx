@@ -28,7 +28,6 @@ const navByRole: Record<UserRole, NavItem[]> = {
     { label: 'Technicians', path: '/admin/technicians', icon: Wrench },
     { label: 'Tickets', path: '/admin/tickets', icon: ClipboardList },
     { label: 'Installations', path: '/admin/installations', icon: Building2 },
-    { label: 'Analytics', path: '/admin/analytics', icon: BarChart3 },
     { label: 'System', path: '/admin/system', icon: ShieldCheck },
   ],
   technician: [

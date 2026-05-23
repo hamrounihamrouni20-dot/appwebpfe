@@ -281,58 +281,108 @@ export function generateForecastPoints(historical: DailyEnergyPoint[], horizon: 
     }));
   }
 
-  // Train Random Forest on historical data
-  const rf = new RandomForestRegressor(12, 4);
-  const X = sorted.map(p => ({
-    temperature: p.avg_temp ?? 25,
-    irradiance: p.avg_irr ?? 500,
-  }));
-  const y = sorted.map(p => p.energy_kwh);
+  // 1. Train Random Forest Regressor
+  const rf = new RandomForestRegressor(16, 5);
+  const useLags = sorted.length >= 5;
+
+  let X: Record<string, number>[] = [];
+  let y: number[] = [];
+
+  if (useLags) {
+    for (let i = 3; i < sorted.length; i++) {
+      X.push({
+        temperature: sorted[i].avg_temp ?? 25,
+        irradiance: sorted[i].avg_irr ?? 500,
+        lag1: sorted[i - 1].energy_kwh,
+        lag2: sorted[i - 2].energy_kwh,
+        lag3: sorted[i - 3].energy_kwh,
+        dayOfWeek: new Date(sorted[i].date).getDay(),
+        month: new Date(sorted[i].date).getMonth(),
+      });
+      y.push(sorted[i].energy_kwh);
+    }
+  } else {
+    X = sorted.map(p => ({
+      temperature: p.avg_temp ?? 25,
+      irradiance: p.avg_irr ?? 500,
+      dayOfWeek: new Date(p.date).getDay(),
+      month: new Date(p.date).getMonth(),
+    }));
+    y = sorted.map(p => p.energy_kwh);
+  }
+
   rf.fit(X, y);
+
+  // 2. Compute historical weather statistics
+  const totalTemp = sorted.reduce((sum, p) => sum + (p.avg_temp ?? 25), 0);
+  const totalIrr = sorted.reduce((sum, p) => sum + (p.avg_irr ?? 500), 0);
+  const meanTemp = totalTemp / sorted.length;
+  const meanIrr = totalIrr / sorted.length;
+
+  const baseTemp = meanTemp > 0 ? meanTemp : 25;
+  const baseIrr = meanIrr > 0 ? meanIrr : 500;
 
   const avgLast14 = getRollingAverage(sorted, 14);
   const stdDev30 = getStandardDeviation(sorted.slice(-Math.min(30, sorted.length)).map(point => point.energy_kwh));
   const baseConfidence = 85 + Math.min(sorted.length, 100) * 0.15;
 
-  const weatherForecast = [
-    { day: 'Mon', irr: 920, high: 28 },
-    { day: 'Tue', irr: 950, high: 30 },
-    { day: 'Wed', irr: 450, high: 22 },
-    { day: 'Thu', irr: 200, high: 18 },
-    { day: 'Fri', irr: 350, high: 20 },
-    { day: 'Sat', irr: 880, high: 26 },
-    { day: 'Sun', irr: 930, high: 29 },
-  ];
+  // 3. Initialize lag values for recursive step-by-step forecasting
+  let lag1Val = sorted[sorted.length - 1].energy_kwh;
+  let lag2Val = sorted.length >= 2 ? sorted[sorted.length - 2].energy_kwh : lag1Val;
+  let lag3Val = sorted.length >= 3 ? sorted[sorted.length - 3].energy_kwh : lag2Val;
 
   const forecast: ForecastPoint[] = [];
   const today = new Date();
 
+  // 4. Recursive forecasting loop
   for (let day = 1; day <= horizon; day += 1) {
     const futureDate = new Date(today);
     futureDate.setDate(today.getDate() + day);
 
-    // Day of the week index (0 = Monday, 6 = Sunday)
-    const dayOfWeek = (futureDate.getDay() + 6) % 7;
-    const weather = weatherForecast[dayOfWeek] ?? weatherForecast[0];
+    // Weather Simulation: add seasonal cycles, autocorrelated random walks, and clear/cloudy days
+    const progress = day / Math.max(30, horizon);
+    const seasonalTempShift = Math.sin(progress * Math.PI * 2) * 2;
+    const simulatedTemp = baseTemp + seasonalTempShift + (Math.random() - 0.5) * 4;
+
+    const isCloudy = Math.random() < 0.20; // 20% chance of a low-production cloudy day
+    const cloudFactor = isCloudy ? 0.30 + Math.random() * 0.30 : 0.85 + Math.random() * 0.15;
+    const simulatedIrr = baseIrr * cloudFactor;
 
     // Predict using Random Forest
-    let rfPrediction = rf.predict({
-      temperature: weather.high,
-      irradiance: weather.irr,
-    });
+    let rfPrediction = 0;
+    if (useLags) {
+      rfPrediction = rf.predict({
+        temperature: simulatedTemp,
+        irradiance: simulatedIrr,
+        lag1: lag1Val,
+        lag2: lag2Val,
+        lag3: lag3Val,
+        dayOfWeek: futureDate.getDay(),
+        month: futureDate.getMonth(),
+      });
+    } else {
+      rfPrediction = rf.predict({
+        temperature: simulatedTemp,
+        irradiance: simulatedIrr,
+        dayOfWeek: futureDate.getDay(),
+        month: futureDate.getMonth(),
+      });
+    }
 
-    // Fallback/Blend prediction with rolling average for stability (blend 30% historical base)
+    // Blend prediction with rolling average for stability (70% model, 30% baseline)
     const blendFactor = 0.3;
-    const finalPrediction = rfPrediction * (1 - blendFactor) + avgLast14 * blendFactor;
-    
     const seasonality = getSeasonalityFactor(futureDate);
-    const predictedValue = Math.max(0, finalPrediction * seasonality);
-    const predicted = Number(predictedValue.toFixed(2));
+    const finalPrediction = Math.max(0, (rfPrediction * (1 - blendFactor) + avgLast14 * blendFactor) * seasonality);
+    const predicted = Number(finalPrediction.toFixed(2));
 
-    const varianceMargin = Math.max(1, stdDev30 * 0.85, predicted * 0.12);
+    // Dynamic uncertainty margin (grows as the forecast horizon extends)
+    const uncertaintyGrowth = 1.0 + (day * 0.04);
+    const varianceMargin = Math.max(1.5, stdDev30 * 0.85 * uncertaintyGrowth, predicted * 0.15 * uncertaintyGrowth);
     const lower = Number(Math.max(0, predicted - varianceMargin).toFixed(2));
     const upper = Number((predicted + varianceMargin).toFixed(2));
-    const confidence_pct = Number(Math.max(55, Math.min(98, baseConfidence - (varianceMargin / Math.max(1, predicted)) * 7)).toFixed(0));
+
+    // Confidence decreases over time
+    const confidence_pct = Number(Math.max(50, Math.min(98, baseConfidence - (day * 0.5) - (varianceMargin / Math.max(1, predicted)) * 5)).toFixed(0));
 
     forecast.push({
       date: futureDate.toISOString().slice(0, 10),
@@ -341,6 +391,11 @@ export function generateForecastPoints(historical: DailyEnergyPoint[], horizon: 
       upper,
       confidence_pct,
     });
+
+    // Update lags recursively
+    lag3Val = lag2Val;
+    lag2Val = lag1Val;
+    lag1Val = predicted;
   }
 
   return forecast;
