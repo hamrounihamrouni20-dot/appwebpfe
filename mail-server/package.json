@@ -1,0 +1,16 @@
+{
+  "name": "solarwatch-mail-server",
+  "version": "1.0.0",
+  "description": "Lightweight mail microservice for SolarWatch using Nodemailer and Gmail SMTP",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.2",
+    "nodemailer": "^6.9.3"
+  }
+}
